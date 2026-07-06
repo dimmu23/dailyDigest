@@ -1,0 +1,155 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum ReleaseState {
+  DISCOVERED
+  FETCHED
+  ENRICHED
+  FAILED
+}
+
+enum SyncStatus {
+  RUNNING
+  SUCCESS
+  PARTIAL
+  FAILED
+}
+
+enum SyncTrigger {
+  MANUAL
+  CRON
+  RETRY
+}
+
+enum DiscoverySource {
+  RSS
+  ALL_RELEASES
+  MINISTRY_PAGE
+}
+
+model Ministry {
+  id            String    @id @default(cuid())
+  name          String    @unique
+  slug          String    @unique
+  pibSourceId   String?   @unique @map("pib_source_id")
+  releases      Release[]
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  @@map("ministries")
+}
+
+model Release {
+  id                    String          @id @default(cuid())
+  prid                  String?         @unique
+  sourceId              String?         @map("source_id")
+  title                 String
+  ministryId            String?         @map("ministry_id")
+  ministry              Ministry?       @relation(fields: [ministryId], references: [id], onDelete: SetNull)
+  category              String?
+  publishedDate         DateTime        @map("published_date")
+  sourceUrl             String          @unique @map("source_url")
+  primaryPdfUrl         String?         @map("primary_pdf_url")
+  pdfUrls               String[]        @default([]) @map("pdf_urls")
+  rawText               String          @db.Text @map("raw_text")
+  pdfText               String?         @db.Text @map("pdf_text")
+  summary               String?         @db.Text
+  upscRelevanceScore    Int?            @map("upsc_relevance_score")
+  isUpscRelevant        Boolean?        @map("is_upsc_relevant")
+  gsPaperMapping        String[]        @default([]) @map("gs_paper_mapping")
+  prelimsRelevance      Boolean?        @map("prelims_relevance")
+  mainsRelevance        Boolean?        @map("mains_relevance")
+  essayRelevance        Boolean?        @map("essay_relevance")
+  optionalRelevance     String?         @map("optional_relevance")
+  whyImportant          String[]        @default([]) @map("why_important")
+  lowConfidenceFields   String[]        @default([]) @map("low_confidence_fields")
+  state                 ReleaseState    @default(DISCOVERED)
+  discoverySource       DiscoverySource @map("discovery_source")
+  sourceContentHash     String?         @map("source_content_hash")
+  aiModel               String?         @map("ai_model")
+  aiPromptVersion       String?         @map("ai_prompt_version")
+  aiEnrichedAt          DateTime?       @map("ai_enriched_at")
+  ingestionError        String?         @db.Text @map("ingestion_error")
+  tags                  ReleaseTag[]
+  bookmarks             Bookmark[]
+  createdAt             DateTime        @default(now()) @map("created_at")
+  updatedAt             DateTime        @updatedAt @map("updated_at")
+
+  @@index([publishedDate(sort: Desc)])
+  @@index([upscRelevanceScore(sort: Desc)])
+  @@index([ministryId, publishedDate(sort: Desc)])
+  @@index([state, aiEnrichedAt])
+  @@index([sourceId])
+  @@map("releases")
+}
+
+model Tag {
+  id        String       @id @default(cuid())
+  name      String       @unique
+  slug      String       @unique
+  releases  ReleaseTag[]
+  createdAt DateTime     @default(now()) @map("created_at")
+  updatedAt DateTime     @updatedAt @map("updated_at")
+
+  @@map("tags")
+}
+
+model ReleaseTag {
+  releaseId String  @map("release_id")
+  tagId     String  @map("tag_id")
+  release   Release @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  tag       Tag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([releaseId, tagId])
+  @@index([tagId, releaseId])
+  @@map("release_tags")
+}
+
+model Bookmark {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  releaseId String   @map("release_id")
+  release   Release  @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, releaseId])
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("bookmarks")
+}
+
+model SyncLog {
+  id            String      @id @default(cuid())
+  trigger       SyncTrigger
+  status        SyncStatus  @default(RUNNING)
+  source        String
+  discovered    Int         @default(0)
+  created       Int         @default(0)
+  updated       Int         @default(0)
+  skipped       Int         @default(0)
+  enriched      Int         @default(0)
+  failed        Int         @default(0)
+  errors        Json?
+  startedAt     DateTime    @default(now()) @map("started_at")
+  completedAt   DateTime?   @map("completed_at")
+  createdAt     DateTime    @default(now()) @map("created_at")
+
+  @@index([startedAt(sort: Desc)])
+  @@index([status, startedAt(sort: Desc)])
+  @@map("sync_logs")
+}
+
+model SyncLock {
+  name        String   @id
+  owner       String
+  lockedUntil DateTime @map("locked_until")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("sync_locks")
+}
