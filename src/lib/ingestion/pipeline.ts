@@ -6,7 +6,6 @@ import {
   type DiscoverySource,
   type SyncTrigger
 } from "@prisma/client";
-import pLimit from "p-limit";
 import { classifyRelease, canClassify } from "@/lib/ai/classify";
 import { PROMPT_VERSION } from "@/lib/ai/prompt";
 import { db } from "@/lib/db";
@@ -18,6 +17,8 @@ import {
 } from "@/lib/ingestion/discovery";
 import { fetchAndParseRelease } from "@/lib/ingestion/detail";
 import { extractPdfText } from "@/lib/ingestion/pdf";
+import { logError, logInfo, logWarn } from "@/lib/logger";
+import { enqueueReleaseProcessing } from "@/lib/queue/queue";
 import type {
   DiscoveryCandidate,
   ItemError,
@@ -29,6 +30,32 @@ import { contentHash, normalizeWhitespace, slugify } from "@/lib/text";
 const LOCK_NAME = "global-pib-sync";
 const LOCK_LEASE_MINUTES = 25;
 const MAX_LOGGED_ERRORS = 50;
+
+export type ReleaseProcessingStage =
+  | "db_load"
+  | "mark_processing"
+  | "fetch_detail"
+  | "extract_pdf"
+  | "save_source"
+  | "ai_enrich"
+  | "mark_failed"
+  | "complete";
+
+export type ReleaseProcessingProgress = {
+  stage: ReleaseProcessingStage;
+  releaseId: string;
+  state?: ReleaseState;
+  title?: string;
+  sourceUrl?: string;
+  pdfCount?: number;
+  pdfTextLength?: number;
+  unchanged?: boolean;
+  message?: string;
+};
+
+type ReleaseProcessingOptions = {
+  onProgress?: (progress: ReleaseProcessingProgress) => void;
+};
 
 export class SyncInProgressError extends Error {
   constructor() {
@@ -64,12 +91,20 @@ function addError(stats: SyncStats, error: ItemError) {
   if (stats.errors.length < MAX_LOGGED_ERRORS) stats.errors.push(error);
 }
 
-async function discover(stats: SyncStats): Promise<{
+function newestFirst(items: DiscoveryCandidate[]) {
+  return [...items].sort((left, right) => {
+    const leftTime = left.publishedDate?.getTime() ?? 0;
+    const rightTime = right.publishedDate?.getTime() ?? 0;
+    return rightTime - leftTime;
+  });
+}
+
+export async function discoverReleases(stats: SyncStats): Promise<{
   items: DiscoveryCandidate[];
   source: DiscoverySource;
 }> {
   try {
-    const rss = dedupeCandidates(await discoverFromRss());
+    const rss = newestFirst(dedupeCandidates(await discoverFromRss()));
     if (rss.length > 0) return { items: rss, source: "RSS" };
     stats.errors.push({
       stage: "discovery",
@@ -85,7 +120,7 @@ async function discover(stats: SyncStats): Promise<{
   }
 
   try {
-    const fallback = dedupeCandidates(await discoverFromAllReleases());
+    const fallback = newestFirst(dedupeCandidates(await discoverFromAllReleases()));
     return { items: fallback, source: "ALL_RELEASES" };
   } catch (error) {
     stats.errors.push({
@@ -97,7 +132,7 @@ async function discover(stats: SyncStats): Promise<{
   }
 }
 
-async function getPdfText(parsed: ParsedRelease, stats: SyncStats): Promise<string | null> {
+export async function getPdfText(parsed: ParsedRelease, stats: SyncStats): Promise<string | null> {
   const parts: string[] = [];
   for (const [index, url] of parsed.pdfUrls.slice(0, 3).entries()) {
     try {
@@ -117,7 +152,7 @@ async function getPdfText(parsed: ParsedRelease, stats: SyncStats): Promise<stri
   return parts.length ? parts.join("\n\n") : null;
 }
 
-async function upsertSource(
+export async function upsertSource(
   parsed: ParsedRelease,
   pdfText: string | null,
   discoverySource: DiscoverySource
@@ -164,6 +199,7 @@ async function upsertSource(
       existing.sourceContentHash === hash &&
       existing.aiPromptVersion === PROMPT_VERSION &&
       existing.state === ReleaseState.ENRICHED;
+    const hadEnrichment = Boolean(existing.aiEnrichedAt);
     const release = await db.release.update({
       where: { id: existing.id },
       data: {
@@ -171,14 +207,14 @@ async function upsertSource(
         state: unchanged ? ReleaseState.ENRICHED : ReleaseState.FETCHED
       }
     });
-    return { release, created: false, unchanged };
+    return { release, created: false, unchanged, hadEnrichment };
   }
 
   const release = await db.release.create({ data });
-  return { release, created: true, unchanged: false };
+  return { release, created: true, unchanged: false, hadEnrichment: false };
 }
 
-async function enrichRelease(
+export async function enrichRelease(
   release: Awaited<ReturnType<typeof upsertSource>>["release"],
   parsed: ParsedRelease,
   pdfText: string | null
@@ -222,7 +258,7 @@ async function enrichRelease(
         optionalRelevance: analysis.optional_relevance,
         whyImportant: analysis.why_important,
         lowConfidenceFields: analysis.low_confidence_fields,
-        aiModel: env.GEMINI_MODEL,
+        aiModel: env.CEREBRAS_MODEL,
         aiPromptVersion: PROMPT_VERSION,
         aiEnrichedAt: new Date(),
         state: ReleaseState.ENRICHED,
@@ -232,7 +268,7 @@ async function enrichRelease(
   ]);
 }
 
-async function recordFailedCandidate(candidate: DiscoveryCandidate, message: string) {
+async function upsertDiscoveredCandidate(candidate: DiscoveryCandidate) {
   const existing = await db.release.findFirst({
     where: {
       OR: [
@@ -242,91 +278,176 @@ async function recordFailedCandidate(candidate: DiscoveryCandidate, message: str
     }
   });
   if (existing) {
-    await db.release.update({
-      where: { id: existing.id },
-      data: { ingestionError: message, state: existing.state === "ENRICHED" ? "ENRICHED" : "FAILED" }
-    });
-    return;
+    return {
+      release: existing,
+      created: false,
+      shouldEnqueue: existing.state !== ReleaseState.ENRICHED
+    };
   }
-  await db.release.create({
+
+  const ministryName = candidate.ministry
+    ? normalizeWhitespace(candidate.ministry).slice(0, 160)
+    : null;
+  const ministry = ministryName
+    ? await db.ministry.upsert({
+        where: { name: ministryName },
+        update: {},
+        create: { name: ministryName, slug: slugify(ministryName) || `ministry-${randomUUID()}` }
+      })
+    : null;
+
+  const release = await db.release.create({
     data: {
       prid: candidate.prid,
       sourceId: candidate.sourceId,
       title: candidate.title || "Not available from source.",
+      ministryId: ministry?.id ?? null,
       publishedDate: candidate.publishedDate || new Date(),
       sourceUrl: candidate.sourceUrl,
       rawText: "",
       discoverySource: candidate.discoverySource,
-      state: "FAILED",
-      ingestionError: message
+      state: ReleaseState.DISCOVERED,
+      ingestionError: null
     }
   });
+
+  return { release, created: true, shouldEnqueue: true };
 }
 
-async function processCandidate(candidate: DiscoveryCandidate, stats: SyncStats) {
+export async function processReleaseById(
+  releaseId: string,
+  options: ReleaseProcessingOptions = {}
+) {
+  options.onProgress?.({ stage: "db_load", releaseId });
+  const release = await db.release.findUnique({
+    where: { id: releaseId },
+    include: { ministry: true }
+  });
+  if (!release) throw new Error(`Release not found: ${releaseId}`);
+  options.onProgress?.({
+    stage: "db_load",
+    releaseId,
+    state: release.state,
+    title: release.title,
+    sourceUrl: release.sourceUrl
+  });
+
+  await db.release.update({
+    where: { id: release.id },
+    data: { state: ReleaseState.PROCESSING, ingestionError: null }
+  });
+  options.onProgress?.({
+    stage: "mark_processing",
+    releaseId,
+    state: ReleaseState.PROCESSING,
+    title: release.title,
+    sourceUrl: release.sourceUrl
+  });
+
+  const stats: SyncStats = {
+    discovered: 0,
+    created: 0,
+    updated: 0,
+    skipped: 0,
+    enriched: 0,
+    failed: 0,
+    errors: []
+  };
+
   try {
+    const candidate: DiscoveryCandidate = {
+      sourceUrl: release.sourceUrl,
+      sourceId: release.sourceId,
+      prid: release.prid,
+      title: release.title,
+      ministry: release.ministry?.name,
+      publishedDate: release.publishedDate,
+      discoverySource: release.discoverySource
+    };
+    options.onProgress?.({
+      stage: "fetch_detail",
+      releaseId,
+      title: release.title,
+      sourceUrl: release.sourceUrl
+    });
     const parsed = await fetchAndParseRelease(candidate);
+    options.onProgress?.({
+      stage: "extract_pdf",
+      releaseId,
+      title: parsed.title,
+      sourceUrl: parsed.sourceUrl,
+      pdfCount: parsed.pdfUrls.length
+    });
     const pdfText = await getPdfText(parsed, stats);
-    const persisted = await upsertSource(parsed, pdfText, candidate.discoverySource);
-    if (persisted.created) stats.created += 1;
-    else stats.updated += 1;
+    options.onProgress?.({
+      stage: "save_source",
+      releaseId,
+      title: parsed.title,
+      sourceUrl: parsed.sourceUrl,
+      pdfCount: parsed.pdfUrls.length,
+      pdfTextLength: pdfText?.length ?? 0
+    });
+    const persisted = await upsertSource(parsed, pdfText, release.discoverySource);
 
     if (persisted.unchanged) {
-      stats.skipped += 1;
+      options.onProgress?.({
+        stage: "complete",
+        releaseId,
+        state: ReleaseState.ENRICHED,
+        title: parsed.title,
+        sourceUrl: parsed.sourceUrl,
+        unchanged: true
+      });
       return;
     }
     if (!canClassify()) {
-      stats.skipped += 1;
-      return;
+      throw new Error("AI enrichment is not configured. Set CEREBRAS_API_KEY.");
     }
 
-    try {
-      await enrichRelease(persisted.release, parsed, pdfText);
-      stats.enriched += 1;
-    } catch (error) {
-      await db.release.update({
-        where: { id: persisted.release.id },
-        data: {
-          state: "FETCHED",
-          ingestionError: `AI enrichment failed: ${
-            error instanceof Error ? error.message : "Unknown AI error"
-          }`
-        }
-      });
-      addError(stats, {
-        sourceUrl: candidate.sourceUrl,
-        stage: "ai",
-        code: "AI_ENRICHMENT_FAILED",
-        message: error instanceof Error ? error.message : "AI enrichment failed."
-      });
-    }
+    options.onProgress?.({
+      stage: "ai_enrich",
+      releaseId,
+      title: parsed.title,
+      sourceUrl: parsed.sourceUrl
+    });
+    await enrichRelease(persisted.release, parsed, pdfText);
+    options.onProgress?.({
+      stage: "complete",
+      releaseId,
+      state: ReleaseState.ENRICHED,
+      title: parsed.title,
+      sourceUrl: parsed.sourceUrl
+    });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Release ingestion failed.";
-    try {
-      await recordFailedCandidate(candidate, message);
-    } catch (databaseError) {
-      if (stats.errors.length < MAX_LOGGED_ERRORS) {
-        stats.errors.push({
-          sourceUrl: candidate.sourceUrl,
-          stage: "database",
-          code: "FAILED_RECORD_WRITE",
-          message:
-            databaseError instanceof Error ? databaseError.message : "Could not save failed item."
-        });
-      }
-    }
-    addError(stats, {
-      sourceUrl: candidate.sourceUrl,
-      stage: "detail",
-      code: "ITEM_FAILED",
+    const message = error instanceof Error ? error.message : "Release processing failed.";
+    options.onProgress?.({
+      stage: "mark_failed",
+      releaseId,
+      state: ReleaseState.FAILED,
+      title: release.title,
+      sourceUrl: release.sourceUrl,
       message
     });
+    await db.release.update({
+      where: { id: release.id },
+      data: { state: ReleaseState.FAILED, ingestionError: message }
+    });
+    throw error;
   }
 }
 
 export async function runPibSync(trigger: SyncTrigger = "MANUAL") {
   const owner = randomUUID();
-  if (!(await acquireLock(owner))) throw new SyncInProgressError();
+  logInfo("pib_sync_started", {
+    owner,
+    trigger,
+    maxItems: env.PIB_MAX_ITEMS_PER_SYNC,
+    fetchConcurrency: env.PIB_FETCH_CONCURRENCY
+  });
+  if (!(await acquireLock(owner))) {
+    logWarn("pib_sync_lock_rejected", { owner, trigger });
+    throw new SyncInProgressError();
+  }
 
   const stats: SyncStats = {
     discovered: 0,
@@ -344,10 +465,18 @@ export async function runPibSync(trigger: SyncTrigger = "MANUAL") {
     const log = await db.syncLog.create({ data: { trigger, source, status: "RUNNING" } });
     logId = log.id;
 
-    const discovery = await discover(stats);
+    const discovery = await discoverReleases(stats);
     source = discovery.source;
     const items = discovery.items.slice(0, env.PIB_MAX_ITEMS_PER_SYNC);
     stats.discovered = items.length;
+    logInfo("pib_sync_discovery_completed", {
+      owner,
+      syncId: log.id,
+      trigger,
+      source,
+      discovered: stats.discovered,
+      discoveryErrors: stats.errors.length
+    });
 
     if (items.length === 0) {
       stats.errors.push({
@@ -356,8 +485,33 @@ export async function runPibSync(trigger: SyncTrigger = "MANUAL") {
         message: "No releases were found in RSS or All Releases. Existing data was preserved."
       });
     } else {
-      const limit = pLimit(env.PIB_FETCH_CONCURRENCY);
-      await Promise.all(items.map((candidate) => limit(() => processCandidate(candidate, stats))));
+      for (const candidate of items) {
+        try {
+          const persisted = await upsertDiscoveredCandidate(candidate);
+          if (persisted.created) stats.created += 1;
+          else if (persisted.shouldEnqueue) stats.updated += 1;
+
+          if (persisted.shouldEnqueue) {
+            await enqueueReleaseProcessing(persisted.release.id);
+          } else {
+            stats.skipped += 1;
+          }
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : "Could not save discovered release.";
+          logError(
+            "pib_sync_discovered_item_failed",
+            { sourceUrl: candidate.sourceUrl, discoverySource: candidate.discoverySource },
+            error
+          );
+          addError(stats, {
+            sourceUrl: candidate.sourceUrl,
+            stage: "database",
+            code: "DISCOVERED_RECORD_WRITE",
+            message
+          });
+        }
+      }
     }
 
     const hasOperationalErrors = stats.errors.some(
@@ -382,8 +536,23 @@ export async function runPibSync(trigger: SyncTrigger = "MANUAL") {
         completedAt: new Date()
       }
     });
+    logInfo("pib_sync_completed", {
+      owner,
+      syncId: log.id,
+      trigger,
+      status,
+      source,
+      discovered: stats.discovered,
+      created: stats.created,
+      updated: stats.updated,
+      skipped: stats.skipped,
+      enriched: stats.enriched,
+      failed: stats.failed,
+      errorCount: stats.errors.length
+    });
     return { syncId: log.id, status, source, ...stats };
   } catch (error) {
+    logError("pib_sync_failed", { owner, syncId: logId, trigger, source }, error);
     if (logId) {
       await db.syncLog.update({
         where: { id: logId },
@@ -404,6 +573,8 @@ export async function runPibSync(trigger: SyncTrigger = "MANUAL") {
     }
     throw error;
   } finally {
-    await releaseLock(owner).catch((error) => console.error("Failed to release sync lock", error));
+    await releaseLock(owner).catch((error) =>
+      logError("pib_sync_lock_release_failed", { owner, syncId: logId, trigger }, error)
+    );
   }
 }

@@ -9,7 +9,7 @@ The repository contains:
 - PostgreSQL/Prisma models for releases, ministries, tags, bookmarks, and sync logs;
 - manual and scheduled sync endpoints;
 - PIB RSS, release-page, attachment, and PDF ingestion;
-- Gemini structured-output classification with strict source-grounding rules;
+- Cerebras structured-output classification with strict source-grounding rules;
 - focused parser, validation, and API utility tests.
 
 Read the full product and engineering specification in
@@ -40,8 +40,8 @@ curl -X POST http://localhost:3000/api/sync \
 | --- | --- |
 | `DATABASE_URL` | PostgreSQL pooled/runtime connection |
 | `DIRECT_URL` | Optional direct connection for migrations |
-| `GEMINI_API_KEY` | AI enrichment; when absent, releases remain fetched but unenriched |
-| `GEMINI_MODEL` | Defaults to stable `gemini-2.5-flash` |
+| `CEREBRAS_API_KEY` | AI enrichment; when absent, releases remain fetched but unenriched |
+| `CEREBRAS_MODEL` | Defaults to `gpt-oss-120b` |
 | `SYNC_SECRET` | Protects manual/cron sync |
 | `APP_URL` | Canonical deployed URL |
 

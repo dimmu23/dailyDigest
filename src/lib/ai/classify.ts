@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import Cerebras from "@cerebras/cerebras_cloud_sdk";
 import { env } from "@/lib/env";
 import { clampText } from "@/lib/text";
 import { SYSTEM_PROMPT, userPrompt } from "@/lib/ai/prompt";
@@ -18,50 +18,68 @@ export type ClassificationInput = {
   pdfText?: string | null;
 };
 
-let client: GoogleGenAI | undefined;
+type ChatCompletionWithText = {
+  choices?: Array<{
+    message?: {
+      content?: string | null;
+    } | null;
+  }>;
+};
+
+let client: Cerebras | undefined;
 
 function getClient() {
-  if (!env.GEMINI_API_KEY) {
-    throw new Error("GEMINI_API_KEY is not configured.");
+  if (!env.CEREBRAS_API_KEY) {
+    throw new Error("CEREBRAS_API_KEY is not configured.");
   }
-  client ??= new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
+  client ??= new Cerebras({ apiKey: env.CEREBRAS_API_KEY });
   return client;
 }
 
 export function canClassify(): boolean {
-  return Boolean(env.GEMINI_API_KEY);
+  return Boolean(env.CEREBRAS_API_KEY);
 }
 
 export async function classifyRelease(input: ClassificationInput): Promise<UpscAnalysis> {
-  const response = await getClient().models.generateContent({
-    model: env.GEMINI_MODEL,
-    contents: userPrompt({
-      title: input.title,
-      ministry: input.ministry || "Not available from source.",
-      publishedDate: input.publishedDate.toISOString(),
-      category: input.category || "Not available from source.",
-      sourceUrl: input.sourceUrl,
-      articleText: clampText(input.articleText, 45_000),
-      pdfText: input.pdfText ? clampText(input.pdfText, 30_000) : null
-    }),
-    config: {
-      systemInstruction: SYSTEM_PROMPT,
-      responseMimeType: "application/json",
-      responseJsonSchema: upscAnalysisJsonSchema,
-      temperature: 0.2
-    }
+  const response = await getClient().chat.completions.create({
+    model: env.CEREBRAS_MODEL,
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      {
+        role: "user",
+        content: userPrompt({
+          title: input.title,
+          ministry: input.ministry || "Not available from source.",
+          publishedDate: input.publishedDate.toISOString(),
+          category: input.category || "Not available from source.",
+          sourceUrl: input.sourceUrl,
+          articleText: clampText(input.articleText, 45_000),
+          pdfText: input.pdfText ? clampText(input.pdfText, 30_000) : null
+        })
+      }
+    ],
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "upsc_analysis",
+        strict: true,
+        schema: upscAnalysisJsonSchema
+      }
+    },
+    reasoning_effort: "low",
+    temperature: 0.2
   });
 
-  const text = response.text;
+  const text = (response as ChatCompletionWithText).choices?.[0]?.message?.content;
   if (!text) {
-    throw new Error("Gemini did not return structured output.");
+    throw new Error("Cerebras did not return structured output.");
   }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    throw new Error("Gemini returned invalid JSON.");
+    throw new Error("Cerebras returned invalid JSON.");
   }
 
   const analysis = upscAnalysisSchema.parse(parsed);

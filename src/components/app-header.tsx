@@ -7,7 +7,7 @@ export function AppHeader() {
         <Link className="brand" href="/">
           <span className="brand-mark" aria-hidden="true">P</span>
           <span>
-            <strong>PIB UPSC Brief</strong>
+            <strong> Daily Digest</strong>
             <small>Official updates, exam-ready</small>
           </span>
         </Link>

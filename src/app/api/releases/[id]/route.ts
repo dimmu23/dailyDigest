@@ -1,12 +1,13 @@
 import { db } from "@/lib/db";
-import { apiError, handleRouteError, ok } from "@/lib/http";
+import { apiError, ok, withApiLogging } from "@/lib/http";
 import { releaseInclude } from "@/lib/releases";
 
-export async function GET(
-  _request: Request,
-  context: { params: Promise<{ id: string }> }
-) {
-  try {
+export const GET = withApiLogging(
+  "/api/releases/[id]",
+  async (
+    _request: Request,
+    context: { params: Promise<{ id: string }> }
+  ) => {
     const { id } = await context.params;
     const release = await db.release.findUnique({
       where: { id },
@@ -14,8 +15,5 @@ export async function GET(
     });
     if (!release) return apiError("not_found", "Release not found.", 404);
     return ok(release);
-  } catch (error) {
-    return handleRouteError(error);
   }
-}
-
+);

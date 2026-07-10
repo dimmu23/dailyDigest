@@ -23,31 +23,26 @@ export const upscAnalysisJsonSchema = {
   properties: {
     is_upsc_relevant: { type: "boolean" },
     relevance_score: { type: "integer", minimum: 1, maximum: 10 },
-    summary: { type: "string", minLength: 1, maxLength: 1600 },
+    summary: { type: "string" },
     prelims_relevance: { type: "boolean" },
     mains_relevance: { type: "boolean" },
     gs_papers: {
       type: "array",
-      items: { type: "string", enum: [...GS_PAPERS] },
-      maxItems: GS_PAPERS.length
+      items: { type: "string", enum: [...GS_PAPERS] }
     },
     essay_relevance: { type: "boolean" },
-    optional_relevance: { type: "string", minLength: 1, maxLength: 240 },
+    optional_relevance: { type: "string" },
     tags: {
       type: "array",
-      items: { type: "string", enum: [...UPSC_TAGS] },
-      maxItems: UPSC_TAGS.length
+      items: { type: "string", enum: [...UPSC_TAGS] }
     },
     why_important: {
       type: "array",
-      items: { type: "string", minLength: 1, maxLength: 320 },
-      minItems: 3,
-      maxItems: 5
+      items: { type: "string" }
     },
     low_confidence_fields: {
       type: "array",
-      items: { type: "string", minLength: 1, maxLength: 120 },
-      maxItems: 10
+      items: { type: "string" }
     }
   },
   required: [

@@ -288,7 +288,7 @@ syllabus-relevant, and 9–10 as exceptional cross-paper or major policy value.
 ├── prisma/schema.prisma
 ├── src/app/                       UI and route handlers
 ├── src/components/                dashboard client islands
-├── src/lib/ai/                    prompt, schema, Gemini adapter
+├── src/lib/ai/                    prompt, schema, Cerebras adapter
 ├── src/lib/ingestion/             discovery/detail/PDF/sync pipeline
 ├── src/lib/releases.ts            query/filter data access
 ├── src/lib/db.ts                  Prisma singleton

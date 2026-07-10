@@ -2,16 +2,26 @@ import { Prisma, ReleaseState } from "@prisma/client";
 import { db } from "@/lib/db";
 import { z } from "zod";
 
+const emptyToUndefined = (value: unknown) => (value === "" ? undefined : value);
+const optionalDate = z.preprocess(emptyToUndefined, z.iso.date().optional());
+const optionalString = (max: number) =>
+  z.preprocess(emptyToUndefined, z.string().trim().max(max).optional());
+const optionalEnum = <T extends readonly [string, ...string[]]>(values: T) =>
+  z.preprocess(emptyToUndefined, z.enum(values).optional());
+
 export const releaseQuerySchema = z.object({
-  q: z.string().trim().max(200).optional(),
-  from: z.iso.date().optional(),
-  to: z.iso.date().optional(),
-  ministry: z.string().trim().max(120).optional(),
-  tag: z.string().trim().max(80).optional(),
-  gs: z.enum(["GS1", "GS2", "GS3", "GS4", "ESSAY"]).optional(),
-  minScore: z.coerce.number().int().min(1).max(10).optional(),
-  prelims: z.enum(["true", "false"]).optional(),
-  mains: z.enum(["true", "false"]).optional(),
+  q: optionalString(200),
+  from: optionalDate,
+  to: optionalDate,
+  ministry: optionalString(120),
+  tag: optionalString(80),
+  gs: optionalEnum(["GS1", "GS2", "GS3", "GS4", "ESSAY"]),
+  minScore: z.preprocess(
+    emptyToUndefined,
+    z.coerce.number().int().min(1).max(10).optional()
+  ),
+  prelims: optionalEnum(["true", "false"]),
+  mains: optionalEnum(["true", "false"]),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(20),
   sort: z.enum(["published_desc", "score_desc"]).default("published_desc")

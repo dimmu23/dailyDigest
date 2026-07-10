@@ -5,11 +5,12 @@ const optionalUrl = z.string().url().optional().or(z.literal(""));
 const schema = z.object({
   DATABASE_URL: z.string().min(1).optional(),
   DIRECT_URL: z.string().min(1).optional(),
-  GEMINI_API_KEY: z.string().min(1).optional(),
-  GEMINI_MODEL: z.string().min(1).default("gemini-2.5-flash"),
+  CEREBRAS_API_KEY: z.string().min(1).optional(),
+  CEREBRAS_MODEL: z.string().min(1).default("gpt-oss-120b"),
   SYNC_SECRET: z.string().min(16).optional(),
   CRON_SECRET: z.string().min(16).optional(),
   APP_URL: optionalUrl,
+  REDIS_URL: z.string().url().default("redis://localhost:6379"),
   PIB_RSS_URL: z
     .string()
     .url()

@@ -6,6 +6,7 @@
     "dev": "next dev",
     "build": "prisma generate && next build",
     "start": "next start",
+    "worker": "tsx src/workers/releaseWorker.ts",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -17,9 +18,11 @@
     "db:seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
-    "@google/genai": "^1.30.0",
+    "@cerebras/cerebras_cloud_sdk": "^1.64.1",
     "@prisma/client": "^6.19.0",
+    "bullmq": "^5.79.3",
     "cheerio": "1.0.0",
+    "ioredis": "^5.10.1",
     "next": "^16.1.1",
     "p-limit": "^7.2.0",
     "pdf-parse": "^1.1.1",

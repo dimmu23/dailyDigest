@@ -1,11 +1,11 @@
 import { db } from "@/lib/db";
-import { apiError, handleRouteError, ok } from "@/lib/http";
+import { apiError, ok, withApiLogging } from "@/lib/http";
 import { runPibSync, SyncInProgressError } from "@/lib/ingestion/pipeline";
 
 export const maxDuration = 300;
 const PUBLIC_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
 
-export async function POST() {
+export const POST = withApiLogging("/api/refresh", async () => {
   try {
     const latest = await db.syncLog.findFirst({
       where: {
@@ -32,6 +32,6 @@ export async function POST() {
     if (error instanceof SyncInProgressError) {
       return apiError("sync_in_progress", error.message, 409);
     }
-    return handleRouteError(error);
+    throw error;
   }
-}
+});
