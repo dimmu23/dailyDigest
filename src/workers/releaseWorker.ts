@@ -9,7 +9,9 @@ import {
   RELEASE_PROCESSING_QUEUE,
   type ReleaseProcessingJob
 } from "@/lib/queue/constants";
-import { redisConnection } from "@/lib/queue/connection";
+import { getRedisConnection } from "@/lib/queue/connection";
+
+const redisConnection = getRedisConnection();
 
 function baseJobFields(job: Job<ReleaseProcessingJob>, startedAt: number) {
   return {
