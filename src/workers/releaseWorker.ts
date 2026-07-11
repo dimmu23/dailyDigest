@@ -1,3 +1,4 @@
+import { createServer } from "node:http";
 import { Worker, type Job } from "bullmq";
 import { db } from "@/lib/db";
 import {
@@ -12,6 +13,7 @@ import {
 import { getRedisConnection } from "@/lib/queue/connection";
 
 const redisConnection = getRedisConnection();
+const port = Number(process.env.PORT || 3001);
 
 function baseJobFields(job: Job<ReleaseProcessingJob>, startedAt: number) {
   return {
@@ -102,8 +104,43 @@ worker.on("error", (error) => {
   logError("release_worker_runtime_error", { queue: RELEASE_PROCESSING_QUEUE }, error);
 });
 
+const healthServer = createServer((request, response) => {
+  if (request.url === "/health" || request.url === "/") {
+    const body = JSON.stringify({
+      ok: true,
+      service: "release-worker",
+      queue: RELEASE_PROCESSING_QUEUE,
+      redisStatus: redisConnection.status
+    });
+
+    response.writeHead(200, {
+      "content-type": "application/json",
+      "cache-control": "no-store"
+    });
+    response.end(body);
+    return;
+  }
+
+  response.writeHead(404, { "content-type": "application/json" });
+  response.end(JSON.stringify({ ok: false, error: "not_found" }));
+});
+
+healthServer.listen(port, () => {
+  logInfo("release_worker_http_started", {
+    queue: RELEASE_PROCESSING_QUEUE,
+    port,
+    message: "Worker health server is listening."
+  });
+});
+
 async function shutdown(signal: NodeJS.Signals) {
   logInfo("release_worker_shutdown_started", { queue: RELEASE_PROCESSING_QUEUE, signal });
+  await new Promise<void>((resolve, reject) => {
+    healthServer.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
   await worker.close();
   await db.$disconnect();
   await redisConnection.quit();
