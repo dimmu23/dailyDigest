@@ -3,4 +3,5 @@ export const PROCESS_RELEASE_JOB = "process-release";
 
 export type ReleaseProcessingJob = {
   releaseId: string;
+  syncLogId?: string;
 };

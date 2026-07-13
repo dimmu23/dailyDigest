@@ -22,9 +22,9 @@ do not occur in the source material.
 1. A manual refresh and a 30-minute cron use the same idempotent sync service.
 2. Discovery prefers the official English PIB press-release RSS feed. The
    official All Releases page is a fallback/backfill source.
-3. Each discovered detail page is enriched with PRID, title, ministry,
-   publication date, category, canonical URL, article text, and official PDF
-   links when present.
+3. Each discovered release is stored quickly, queued once by release id, and
+   enriched asynchronously with PRID, title, ministry, publication date,
+   category, canonical URL, article text, and official PDF links when present.
 4. Text-based PDFs are downloaded from an allowlisted PIB host and parsed. A
    broken, oversized, or image-only PDF is recorded as a non-fatal item error.
 5. `source_url` and non-null `prid` are database-unique. Re-running sync updates
@@ -36,7 +36,8 @@ do not occur in the source material.
    and minimum score, plus source/PDF links and bookmarks.
 8. Daily digest shows the highest-scored releases published on a selected day.
 9. The UI displays `Not available from source.` for unavailable source fields.
-10. Sync logs distinguish success, partial success, empty response, and failure.
+10. Sync logs distinguish success, partial success, empty response, and failure,
+    and worker jobs update the originating sync row's enriched/failed counters.
 
 ### Non-goals for MVP
 
@@ -63,10 +64,10 @@ flowchart LR
   C["30-minute cron"] --> S["Protected sync route"]
   N --> A["Read APIs / server components"]
   N --> S
-  S --> L["PostgreSQL advisory lock"]
+  S --> L["PostgreSQL sync lock"]
   L --> D["RSS discovery"]
   D -. "empty/failure fallback" .-> AR["PIB All Releases"]
-  D --> Q["Bounded worker queue"]
+  D --> Q["Redis / BullMQ queue"]
   AR --> Q
   Q --> P["PIB detail parser"]
   P --> F["PIB PDF parser"]
@@ -80,9 +81,10 @@ flowchart LR
 
 ### Key decisions
 
-- **One deployable first.** Next.js server routes, UI, ingestion, and scheduled
-  entry points live in one TypeScript application. Move ingestion to a queue
-  worker only when execution time or volume requires it.
+- **Two runtimes, one codebase.** Next.js server routes, UI, discovery, queueing,
+  and the release worker live in one TypeScript repository. The web/API runtime
+  discovers releases and enqueues work; the worker runtime performs slower
+  detail/PDF/AI processing.
 - **RSS-first, HTML-tolerant.** RSS is cheap and stable for discovery. HTML
   parsing is isolated behind adapters and used for detail enrichment and
   fallback discovery.
@@ -92,8 +94,10 @@ flowchart LR
 - **Two-phase persistence.** Parsed source data is saved before AI enrichment.
   An AI outage never loses a release; the item remains `FETCHED` and can be
   retried.
-- **Database truth.** Unique constraints provide the final deduplication barrier.
-  An advisory lock prevents overlapping global sync runs.
+- **Database and queue truth.** Unique constraints provide the final release
+  deduplication barrier. The sync lock prevents overlapping global discovery
+  runs, and BullMQ `jobId = releaseId` prevents duplicate unfinished processing
+  jobs for the same release.
 - **Source traceability.** Source and PDF URLs are preserved. AI prompt version,
   model, content hash, parser errors, and sync statistics are retained.
 
@@ -109,6 +113,7 @@ flowchart LR
 | AI missing/unavailable | Save source record as `FETCHED`; retry later |
 | Invalid AI shape | Reject output; never publish partial/generated fields |
 | Concurrent sync | Return `409 sync_in_progress` |
+| Existing unfinished queue job | Do not enqueue a duplicate; count as skipped |
 
 ## 3. Database schema
 
@@ -122,7 +127,8 @@ The executable Prisma schema is at `prisma/schema.prisma`.
 - `tags`: controlled syllabus vocabulary.
 - `release_tags`: many-to-many release/topic join.
 - `bookmarks`: user-to-release saved state with a composite unique key.
-- `sync_logs`: trigger, status, timing, counts, and structured errors.
+- `sync_logs`: trigger, status, timing, discovery/queue counts, worker
+  completion counters, and structured errors.
 
 Arrays are used for `pdf_urls`, `gs_paper_mapping`, and `why_important` because
 they are bounded attributes of one release. Tags remain relational because they
@@ -187,23 +193,27 @@ a compact sidebar/filter row and two-column cards.
 
 ## 6. Backend ingestion pipeline
 
-1. Authenticate trigger and obtain PostgreSQL advisory lock.
+1. Authenticate trigger and obtain the PostgreSQL-backed sync lock.
 2. Create `sync_logs(RUNNING)`.
 3. Fetch official press-release RSS using conditional cache semantics.
 4. If RSS is empty/fails, fetch official All Releases page.
 5. Normalize URLs, retain only allowlisted PIB hosts, extract PRID, and
    de-duplicate discovery candidates in memory.
-6. Process candidates with low concurrency and jitter/delay.
-7. Fetch detail HTML; remove navigation/scripts; parse source fields, article
+6. Upsert discovered release rows and enqueue non-`ENRICHED` releases in
+   BullMQ using `releaseId` as the job id. Existing unfinished jobs are reused
+   instead of duplicated.
+7. Return discovery/queueing stats quickly and release the sync lock.
+8. Worker fetches detail HTML; removes navigation/scripts; parses source fields, article
    body, category, and all official PDFs.
-8. For bounded PDFs, verify status/content type/size and parse text. Keep
+9. For bounded PDFs, verify status/content type/size and parse text. Keep
    per-attachment errors.
-9. Hash normalized source text and upsert source fields. Skip AI when an already
+10. Hash normalized source text and upsert source fields. Skip AI when an already
    enriched record has the same content hash and prompt version.
-10. Classify source content through schema-constrained output. Validate enums,
+11. Classify source content through schema-constrained output. Validate enums,
     score, bullet count, and source availability semantics.
-11. In a transaction, update AI fields and connect controlled tags.
-12. Complete sync log with counts and error samples; release lock.
+12. In a transaction, update AI fields and connect controlled tags.
+13. Worker increments the linked `sync_logs.enriched` counter on success, or
+    `failed` after BullMQ exhausts retries.
 
 ## 7. AI prompt and output contract
 
@@ -247,11 +257,13 @@ syllabus-relevant, and 9–10 as exceptional cross-paper or major policy value.
 1. **Foundation:** provision Postgres, migrate schema, add seed tags, environment
    validation, health check, and empty dashboard.
 2. **Ingestion:** implement RSS/detail/PDF adapters, allowlist, rate limiting,
-   upsert/deduplication, sync logs, manual trigger, fixtures, and parser tests.
+   upsert/deduplication, Redis/BullMQ queueing, sync logs, manual trigger,
+   fixtures, and parser tests.
 3. **AI enrichment:** structured schema, strict prompt, retryable states,
    same-content skip, evaluation fixture set, and human spot-check workflow.
 4. **Experience and operations:** filters, detail page, daily digest, bookmarks,
-   cron, observability, responsive QA, and deployment runbook.
+   cron, worker health checks, observability, responsive QA, and deployment
+   runbook.
 
 ### MVP release gates
 
@@ -263,8 +275,7 @@ syllabus-relevant, and 9–10 as exceptional cross-paper or major policy value.
 
 ## 9. Advanced version
 
-1. Move fetch/enrichment jobs to a durable queue (Trigger.dev, Inngest,
-   Cloud Tasks, or a worker) with per-item retries and dead-letter handling.
+1. Add dead-letter management, queue dashboards, and operator retry controls.
 2. Add OCR for scanned official PDFs, language detection, and Hindi/English
    source pairing while preserving separate provenance.
 3. Add authenticated Supabase users, cross-device bookmarks, notes, revision
@@ -290,8 +301,10 @@ syllabus-relevant, and 9–10 as exceptional cross-paper or major policy value.
 ├── src/components/                dashboard client islands
 ├── src/lib/ai/                    prompt, schema, Cerebras adapter
 ├── src/lib/ingestion/             discovery/detail/PDF/sync pipeline
+├── src/lib/queue/                 BullMQ queue and Redis connection
 ├── src/lib/releases.ts            query/filter data access
 ├── src/lib/db.ts                  Prisma singleton
+├── src/workers/                   release-processing worker entry point
 ├── tests/                         parser and contract tests
 ├── vercel.json                    30-minute schedule
 └── .env.example

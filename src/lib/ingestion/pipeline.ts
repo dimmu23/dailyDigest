@@ -489,10 +489,11 @@ export async function runPibSync(trigger: SyncTrigger = "MANUAL") {
         try {
           const persisted = await upsertDiscoveredCandidate(candidate);
           if (persisted.created) stats.created += 1;
-          else if (persisted.shouldEnqueue) stats.updated += 1;
 
           if (persisted.shouldEnqueue) {
-            await enqueueReleaseProcessing(persisted.release.id);
+            const enqueueResult = await enqueueReleaseProcessing(persisted.release.id, log.id);
+            if (!persisted.created && enqueueResult.enqueued) stats.updated += 1;
+            else if (!enqueueResult.enqueued) stats.skipped += 1;
           } else {
             stats.skipped += 1;
           }

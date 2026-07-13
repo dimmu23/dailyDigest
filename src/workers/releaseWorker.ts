@@ -60,6 +60,12 @@ const worker = new Worker<ReleaseProcessingJob>(
       await processReleaseById(releaseId, {
         onProgress: (progress) => logJobStage(job, startedAt, progress)
       });
+      if (job.data.syncLogId) {
+        await db.syncLog.update({
+          where: { id: job.data.syncLogId },
+          data: { enriched: { increment: 1 } }
+        });
+      }
       logInfo("release_worker_job_completed", {
         ...baseJobFields(job, startedAt),
         durationMs: Math.round(performance.now() - startedAt),
@@ -85,15 +91,36 @@ const worker = new Worker<ReleaseProcessingJob>(
 );
 
 worker.on("failed", (job, error) => {
+  const attemptsMade = job?.attemptsMade ?? 0;
+  const maxAttempts = job?.opts.attempts ?? 1;
+  const exhausted = attemptsMade >= maxAttempts;
+  if (job?.data.syncLogId && exhausted) {
+    void db.syncLog.update({
+      where: { id: job.data.syncLogId },
+      data: { failed: { increment: 1 } }
+    }).catch((updateError) => {
+      logError(
+        "release_worker_sync_log_failed_increment_error",
+        {
+          queue: RELEASE_PROCESSING_QUEUE,
+          jobId: job.id,
+          releaseId: job.data.releaseId,
+          syncLogId: job.data.syncLogId
+        },
+        updateError
+      );
+    });
+  }
+
   logError(
     "release_worker_retry_or_exhausted",
     {
       queue: RELEASE_PROCESSING_QUEUE,
       jobId: job?.id,
       releaseId: job?.data.releaseId,
-      attemptsMade: job?.attemptsMade,
-      maxAttempts: job?.opts.attempts,
-      willRetry: job ? job.attemptsMade < (job.opts.attempts ?? 1) : undefined,
+      attemptsMade,
+      maxAttempts,
+      willRetry: job ? !exhausted : undefined,
       message: "BullMQ marked the job failed for this attempt."
     },
     error
