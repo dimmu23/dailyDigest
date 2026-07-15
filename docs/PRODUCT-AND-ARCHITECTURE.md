@@ -35,15 +35,16 @@ do not occur in the source material.
 7. Dashboard supports search and filters for date, ministry, topic, GS paper,
    and minimum score, plus source/PDF links and bookmarks.
 8. Daily digest shows the highest-scored releases published on a selected day.
-9. The UI displays `Not available from source.` for unavailable source fields.
-10. Sync logs distinguish success, partial success, empty response, and failure,
+9. Release detail pages support source-grounded single-article Q&A using only that release's stored PIB context.
+10. The UI displays `Not available from source.` for unavailable source fields.
+11. Sync logs distinguish success, partial success, empty response, and failure,
     and worker jobs update the originating sync row's enriched/failed counters.
 
 ### Non-goals for MVP
 
 - Coaching content, current-affairs sources, or facts external to PIB.
 - OCR of scanned PDFs.
-- Full authentication, sharing, notifications, multilingual notes, or semantic
+- Full authentication, sharing, notifications, multilingual notes, saved chat history, cross-article Q&A, or semantic
   search.
 - Automated claims of predicted questions or guaranteed exam importance.
 
@@ -151,6 +152,7 @@ All responses use `{ data, meta? }` on success and
 | --- | --- | --- |
 | `GET` | `/api/releases` | Paginated search/filter list |
 | `GET` | `/api/releases/:id` | Full release note and provenance |
+| `POST` | `/api/releases/:id/ask` | Source-grounded Q&A for one release |
 | `GET` | `/api/digest?date=YYYY-MM-DD` | Daily top items |
 | `POST` | `/api/bookmarks` | Save `{ releaseId, userId }` |
 | `DELETE` | `/api/bookmarks?releaseId=&userId=` | Remove bookmark |
@@ -170,6 +172,8 @@ All responses use `{ data, meta? }` on success and
 
 Mutation routes validate origin-independent bearer credentials where applicable,
 apply Zod validation, and never accept arbitrary source URLs.
+`POST /api/releases/:id/ask` accepts `{ question }` with a 500-character limit. It loads one enriched release, builds context from the title, ministry, date, raw article text, optional PDF text, summary, importance points, GS mapping, and tags, then asks Cerebras for a concise JSON answer. The answer must use only the supplied release context; unsupported answers return `Not available from source.` V1 does not save chat history and does not use embeddings or a vector database.
+
 
 ## 5. Frontend structure
 
@@ -183,6 +187,7 @@ src/components
 ├── app-header.tsx
 ├── dashboard-filters.tsx
 ├── release-card.tsx
+├── ask-article-box.tsx
 ├── refresh-button.tsx
 ├── bookmark-button.tsx
 ├── empty-state.tsx

@@ -331,6 +331,68 @@ button, select { cursor: pointer; }
 .mapping-grid span, .mapping-grid strong { display: block; }
 .mapping-grid span { color: var(--muted); font-size: 10px; font-weight: 800; text-transform: uppercase; }
 .mapping-grid strong { margin-top: 5px; font-size: 13px; }
+.ask-box { display: grid; gap: 16px; }
+.ask-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.ask-chip {
+  padding: 7px 10px;
+  border: 1px solid #d9e2dc;
+  border-radius: 999px;
+  background: #f6f8f5;
+  color: #40584f;
+  font-size: 12px;
+  font-weight: 740;
+}
+.ask-chip:hover { border-color: #abd0c3; color: var(--green-dark); }
+.ask-chip:disabled { cursor: wait; opacity: .6; }
+.ask-form { display: grid; gap: 8px; }
+.ask-form label {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+}
+.ask-form > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 110px;
+  gap: 10px;
+  align-items: stretch;
+}
+.ask-form textarea {
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+  padding: 12px 13px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  outline: none;
+  background: white;
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+}
+.ask-form textarea:focus {
+  border-color: var(--green);
+  box-shadow: 0 0 0 3px rgba(19, 111, 92, .1);
+}
+.ask-answer {
+  padding: 18px;
+  border-left: 4px solid var(--green);
+  background: #eef6f2;
+}
+.ask-answer p { margin: 0; color: #31483f; }
+.ask-answer-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+  text-transform: capitalize;
+}
+.ask-message { margin: 0; font-size: 12px; }
+.ask-message.error { color: #9d3b24; }
 .source-box {
   display: flex;
   align-items: center;
@@ -377,6 +439,7 @@ button, select { cursor: pointer; }
   .note { padding: 25px 20px; }
   .note h1 { font-size: 37px; }
   .mapping-grid { grid-template-columns: 1fr; }
+  .ask-form > div { grid-template-columns: 1fr; }
   .source-box { align-items: stretch; flex-direction: column; }
   .source-actions { justify-content: flex-start; }
 }
@@ -390,4 +453,3 @@ button, select { cursor: pointer; }
   .score { width: 50px; height: 50px; flex-basis: 50px; padding-top: 10px; }
   .source-actions .button { width: 100%; }
 }
-

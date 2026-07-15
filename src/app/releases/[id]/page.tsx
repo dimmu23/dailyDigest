@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { AskArticleBox } from "@/components/ask-article-box";
 import { notFound } from "next/navigation";
 import { BookmarkButton } from "@/components/bookmark-button";
 import { db } from "@/lib/db";
@@ -51,6 +52,7 @@ export default async function ReleasePage({ params }: { params: Promise<{ id: st
           <div><span>Essay</span><strong>{release.essayRelevance ? "Relevant" : "No clear mapping"}</strong></div>
           <div><span>Optional</span><strong>{release.optionalRelevance || NOT_AVAILABLE}</strong></div>
         </section>
+        <AskArticleBox releaseId={release.id} />
         <aside className="source-box">
           <div>
             <span>Primary evidence</span>
@@ -67,4 +69,3 @@ export default async function ReleasePage({ params }: { params: Promise<{ id: st
     </main>
   );
 }
-

@@ -10,7 +10,7 @@ The repository contains:
 - manual and scheduled sync endpoints;
 - Redis/BullMQ release-processing jobs with duplicate queue protection;
 - PIB RSS, release-page, attachment, and PDF ingestion in a worker;
-- Cerebras structured-output classification with strict source-grounding rules;
+- Cerebras structured-output classification and article-level Q&A with strict source-grounding rules;
 - focused parser, validation, and API utility tests.
 
 Read the full product and engineering specification in

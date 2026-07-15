@@ -29,6 +29,7 @@ function baseJobFields(job: Job<QueueJob>, startedAt: number) {
     jobName: job.name,
     jobId: job.id,
     releaseId: "releaseId" in job.data ? job.data.releaseId : undefined,
+    syncLogId: "syncLogId" in job.data ? job.data.syncLogId : undefined,
     syncTrigger: "trigger" in job.data ? job.data.trigger : undefined,
     attempt: job.attemptsMade + 1,
     maxAttempts: job.opts.attempts,
