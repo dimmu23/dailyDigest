@@ -2,12 +2,16 @@ import { createServer } from "node:http";
 import { Worker, type Job } from "bullmq";
 import { db } from "@/lib/db";
 import {
+  runPibSync,
   processReleaseById,
   type ReleaseProcessingProgress
 } from "@/lib/ingestion/pipeline";
 import { logError, logInfo } from "@/lib/logger";
 import {
+  PROCESS_RELEASE_JOB,
   RELEASE_PROCESSING_QUEUE,
+  RUN_PIB_SYNC_JOB,
+  type QueueJob,
   type ReleaseProcessingJob
 } from "@/lib/queue/constants";
 import { getRedisConnection } from "@/lib/queue/connection";
@@ -15,12 +19,17 @@ import { getRedisConnection } from "@/lib/queue/connection";
 const redisConnection = getRedisConnection();
 const port = Number(process.env.PORT || 3001);
 
-function baseJobFields(job: Job<ReleaseProcessingJob>, startedAt: number) {
+function isReleaseProcessingJob(job: Job<QueueJob>): job is Job<ReleaseProcessingJob> {
+  return job.name === PROCESS_RELEASE_JOB && "releaseId" in job.data;
+}
+
+function baseJobFields(job: Job<QueueJob>, startedAt: number) {
   return {
     queue: RELEASE_PROCESSING_QUEUE,
     jobName: job.name,
     jobId: job.id,
-    releaseId: job.data.releaseId,
+    releaseId: "releaseId" in job.data ? job.data.releaseId : undefined,
+    syncTrigger: "trigger" in job.data ? job.data.trigger : undefined,
     attempt: job.attemptsMade + 1,
     maxAttempts: job.opts.attempts,
     elapsedMs: Math.round(performance.now() - startedAt)
@@ -28,7 +37,7 @@ function baseJobFields(job: Job<ReleaseProcessingJob>, startedAt: number) {
 }
 
 function logJobStage(
-  job: Job<ReleaseProcessingJob>,
+  job: Job<QueueJob>,
   startedAt: number,
   progress: ReleaseProcessingProgress
 ) {
@@ -45,18 +54,39 @@ function logJobStage(
   });
 }
 
-const worker = new Worker<ReleaseProcessingJob>(
+const worker = new Worker<QueueJob>(
   RELEASE_PROCESSING_QUEUE,
-  async (job: Job<ReleaseProcessingJob>) => {
+  async (job: Job<QueueJob>) => {
     const startedAt = performance.now();
-    const { releaseId } = job.data;
 
     logInfo("release_worker_job_started", {
       ...baseJobFields(job, startedAt),
-      message: "Worker picked up release processing job."
+      message: "Worker picked up queue job."
     });
 
     try {
+      if (job.name === RUN_PIB_SYNC_JOB && "trigger" in job.data) {
+        const result = await runPibSync(job.data.trigger);
+        logInfo("release_worker_sync_job_completed", {
+          ...baseJobFields(job, startedAt),
+          durationMs: Math.round(performance.now() - startedAt),
+          syncId: result.syncId,
+          status: result.status,
+          discovered: result.discovered,
+          created: result.created,
+          updated: result.updated,
+          skipped: result.skipped,
+          failed: result.failed,
+          message: "PIB sync job finished successfully."
+        });
+        return;
+      }
+
+      if (!isReleaseProcessingJob(job)) {
+        throw new Error(`Unsupported queue job: ${job.name}`);
+      }
+
+      const { releaseId } = job.data;
       await processReleaseById(releaseId, {
         onProgress: (progress) => logJobStage(job, startedAt, progress)
       });
@@ -94,9 +124,11 @@ worker.on("failed", (job, error) => {
   const attemptsMade = job?.attemptsMade ?? 0;
   const maxAttempts = job?.opts.attempts ?? 1;
   const exhausted = attemptsMade >= maxAttempts;
-  if (job?.data.syncLogId && exhausted) {
+  const failedReleaseId = job && "releaseId" in job.data ? job.data.releaseId : undefined;
+  const failedSyncLogId = job && "syncLogId" in job.data ? job.data.syncLogId : undefined;
+  if (job && failedSyncLogId && exhausted) {
     void db.syncLog.update({
-      where: { id: job.data.syncLogId },
+      where: { id: failedSyncLogId },
       data: { failed: { increment: 1 } }
     }).catch((updateError) => {
       logError(
@@ -104,8 +136,8 @@ worker.on("failed", (job, error) => {
         {
           queue: RELEASE_PROCESSING_QUEUE,
           jobId: job.id,
-          releaseId: job.data.releaseId,
-          syncLogId: job.data.syncLogId
+          releaseId: failedReleaseId,
+          syncLogId: failedSyncLogId
         },
         updateError
       );
@@ -117,7 +149,8 @@ worker.on("failed", (job, error) => {
     {
       queue: RELEASE_PROCESSING_QUEUE,
       jobId: job?.id,
-      releaseId: job?.data.releaseId,
+      releaseId: failedReleaseId,
+      syncTrigger: job && "trigger" in job.data ? job.data.trigger : undefined,
       attemptsMade,
       maxAttempts,
       willRetry: job ? !exhausted : undefined,

@@ -72,7 +72,9 @@ npm run db:studio    # Prisma Studio
 
 `/api/cron/sync` can be scheduled every 30 minutes. Set `CRON_SECRET` in the
 deployment environment and call the route with `Authorization: Bearer <secret>`.
-For other platforms, schedule a POST to `/api/sync` with `SYNC_SECRET`.
+The route only enqueues a `run-pib-sync` job and returns quickly; the existing
+worker performs the slow PIB discovery afterward. For direct protected/manual
+sync, call `POST /api/sync` with `SYNC_SECRET`.
 
 Deploy two runtimes from the same repo:
 
@@ -80,8 +82,9 @@ Deploy two runtimes from the same repo:
 - Worker service: start with `npm run worker`. If deployed as a web service,
   set the health check path to `/health`.
 
-Sync endpoints discover releases and enqueue lightweight jobs
-`{ releaseId, syncLogId }`. BullMQ uses `releaseId` as the job id, so the same
+Cron enqueues one lightweight sync job `{ trigger: "CRON" }` using a fixed job id
+`global-pib-sync`. The worker runs `runPibSync("CRON")`, and that sync enqueues
+release jobs `{ releaseId, syncLogId }`. BullMQ uses `releaseId` as the job id, so the same
 unfinished release is not queued repeatedly. Worker completion increments the
 linked `sync_logs.enriched` counter; exhausted retries increment `failed`.
 

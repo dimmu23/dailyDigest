@@ -19,7 +19,7 @@ do not occur in the source material.
 
 ### MVP scope and acceptance criteria
 
-1. A manual refresh and a 30-minute cron use the same idempotent sync service.
+1. A manual refresh and a 30-minute cron use the same idempotent sync service; cron enqueues a sync job so the HTTP request returns quickly.
 2. Discovery prefers the official English PIB press-release RSS feed. The
    official All Releases page is a fallback/backfill source.
 3. Each discovered release is stored quickly, queued once by release id, and
@@ -64,12 +64,15 @@ flowchart LR
   C["30-minute cron"] --> S["Protected sync route"]
   N --> A["Read APIs / server components"]
   N --> S
-  S --> L["PostgreSQL sync lock"]
+  S -- "manual/direct sync" --> L["PostgreSQL sync lock"]
   L --> D["RSS discovery"]
   D -. "empty/failure fallback" .-> AR["PIB All Releases"]
-  D --> Q["Redis / BullMQ queue"]
-  AR --> Q
-  Q --> P["PIB detail parser"]
+  S -- "scheduled cron" --> SQ["run-pib-sync job"]
+  SQ --> Q["Redis / BullMQ queue"]
+  Q -- "sync job" --> D
+  D -- "release jobs" --> Q
+  AR -- "release jobs" --> Q
+  Q -- "release job" --> P["PIB detail parser"]
   P --> F["PIB PDF parser"]
   P --> DB[("PostgreSQL / Supabase")]
   F --> DB
@@ -83,8 +86,8 @@ flowchart LR
 
 - **Two runtimes, one codebase.** Next.js server routes, UI, discovery, queueing,
   and the release worker live in one TypeScript repository. The web/API runtime
-  discovers releases and enqueues work; the worker runtime performs slower
-  detail/PDF/AI processing.
+  handles interactive requests and enqueues scheduled sync work; the worker
+  runtime performs slower PIB discovery, detail/PDF parsing, and AI processing.
 - **RSS-first, HTML-tolerant.** RSS is cheap and stable for discovery. HTML
   parsing is isolated behind adapters and used for detail enrichment and
   fallback discovery.
@@ -193,26 +196,27 @@ a compact sidebar/filter row and two-column cards.
 
 ## 6. Backend ingestion pipeline
 
-1. Authenticate trigger and obtain the PostgreSQL-backed sync lock.
-2. Create `sync_logs(RUNNING)`.
-3. Fetch official press-release RSS using conditional cache semantics.
-4. If RSS is empty/fails, fetch official All Releases page.
-5. Normalize URLs, retain only allowlisted PIB hosts, extract PRID, and
+1. Authenticate trigger. Cron enqueues a `run-pib-sync` BullMQ job and returns immediately; manual refresh may call the sync service directly.
+2. Worker/manual sync obtains the PostgreSQL-backed sync lock.
+3. Create `sync_logs(RUNNING)`.
+4. Fetch official press-release RSS using conditional cache semantics.
+5. If RSS is empty/fails, fetch official All Releases page.
+6. Normalize URLs, retain only allowlisted PIB hosts, extract PRID, and
    de-duplicate discovery candidates in memory.
-6. Upsert discovered release rows and enqueue non-`ENRICHED` releases in
+7. Upsert discovered release rows and enqueue non-`ENRICHED` releases in
    BullMQ using `releaseId` as the job id. Existing unfinished jobs are reused
    instead of duplicated.
-7. Return discovery/queueing stats quickly and release the sync lock.
-8. Worker fetches detail HTML; removes navigation/scripts; parses source fields, article
+8. Return discovery/queueing stats and release the sync lock.
+9. Worker fetches detail HTML; removes navigation/scripts; parses source fields, article
    body, category, and all official PDFs.
-9. For bounded PDFs, verify status/content type/size and parse text. Keep
+10. For bounded PDFs, verify status/content type/size and parse text. Keep
    per-attachment errors.
-10. Hash normalized source text and upsert source fields. Skip AI when an already
+11. Hash normalized source text and upsert source fields. Skip AI when an already
    enriched record has the same content hash and prompt version.
-11. Classify source content through schema-constrained output. Validate enums,
+12. Classify source content through schema-constrained output. Validate enums,
     score, bullet count, and source availability semantics.
-12. In a transaction, update AI fields and connect controlled tags.
-13. Worker increments the linked `sync_logs.enriched` counter on success, or
+13. In a transaction, update AI fields and connect controlled tags.
+14. Worker increments the linked `sync_logs.enriched` counter on success, or
     `failed` after BullMQ exhausts retries.
 
 ## 7. AI prompt and output contract
